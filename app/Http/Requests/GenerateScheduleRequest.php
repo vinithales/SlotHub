@@ -23,11 +23,7 @@ class GenerateScheduleRequest extends FormRequest
     {
         return [
             'business_id' => 'required|exists:businesses,id',
-            'config.days' => 'required|array',
-            'config.days.*' => 'in:monday,tuesday,wednesday,thursday,friday,saturday,sunday',
-            'config.valid_from' => 'required|date_format:H:i',
-            'config.valid_to' => 'required|date_format:H:i|after:config.valid_from',
-            'config.interval' => 'required|integer|min:1'
+            'schedule_config_id' => 'required|exists:schedule_configs,id',
         ];
     }
 }

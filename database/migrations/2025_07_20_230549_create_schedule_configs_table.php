@@ -14,10 +14,11 @@ return new class extends Migration
         Schema::create('schedule_configs', function (Blueprint $table) {
             $table->id();
             $table->foreignId('business_id')->constrained()->onDelete('cascade');
-            $table->unsignedTinyInteger('day_of_week');
+            $table->json('days');
             $table->time('valid_from');
             $table->time('valid_to');
             $table->unsignedInteger('interval');
+            $table->string('type')->nullable();
             $table->timestamps();
         });
     }

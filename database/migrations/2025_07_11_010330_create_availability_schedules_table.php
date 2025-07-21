@@ -14,13 +14,15 @@ return new class extends Migration
         Schema::create('availability_schedules', function (Blueprint $table) {
             $table->id();
             $table->foreignId('business_id')->constrained()->onDelete('cascade');
-            $table->json('config');
+            $table->foreignId('schedule_config_id')->nullable()->constrained()->onDelete('set null');
             $table->dateTime('valid_from');
-            $table->dateTime('valid_to')->nullable();
+            $table->dateTime('valid_to');
+            $table->string('status')->default('available');
+            $table->string('resource_type')->nullable();
+            $table->unsignedBigInteger('resource_id')->nullable();
             $table->boolean('is_active')->default(true);
-            $table->timestamps();
 
-            $table->index(['business_id', 'valid_from', 'valid_to']);
+            $table->timestamps();
         });
     }
 

@@ -27,7 +27,7 @@ class ScheduleController extends Controller
 
         $schedule = $this->scheduleGenerator->generate(
             $data['business_id'],
-            $data['config']
+            $data['schedule_config_id']
         );
 
         return response()->json([

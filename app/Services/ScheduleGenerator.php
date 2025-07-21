@@ -4,83 +4,33 @@ namespace App\Services;
 
 use App\Models\Business;
 use App\Models\AvailabilitySchedule;
-use Carbon\Carbon;
-use Carbon\CarbonPeriod;
+use App\Models\ScheduleConfig;
 use App\Models\BlockedSlot;
 use App\Models\Reservation;
+use Carbon\Carbon;
+use Carbon\CarbonPeriod;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Database\QueryException;
 
 class ScheduleGenerator
 {
-    public function generate(int $businessId, array $config): array
+    private const MAX_QUERY_DAYS = 30;
+    private const MIN_INTERVAL = 15;
+    private const MAX_INTERVAL = 1440;
+
+    public function generate(int $businessId, int $scheduleConfigId): array
     {
+        $config = ScheduleConfig::findOrFail($scheduleConfigId);
+
+        $this->validateConfig($config);
+
         $slots = [];
-        $start = Carbon::parse($config['valid_from']);
-        $end = Carbon::parse($config['valid_to']);
-        $interval = $config['interval'];
-
-        foreach ($config['days'] as $day) {
-            $current = $start->copy();
-
-            while ($current <= $end) {
-                $slots[] = $this->createSlot(
-                    $businessId,
-                    $day,
-                    $current->format('H:i'),
-                    $current->copy(),
-                    $current->copy()->addMinutes($interval),
-                    $config
-                );
-                $current->addMinutes($config['interval']);
-            }
-        }
-
-        return $slots;
-    }
-
-    private function createSlot(
-        int $businessId,
-        string $day,
-        string $time,
-        Carbon $validFrom,
-        Carbon $validTo,
-        array $config
-    ): array {
-        AvailabilitySchedule::create([
-            'business_id' => $businessId,
-            'day' => $day,
-            'time' => $time,
-            'status' => 'available',
-            'valid_from' => $validFrom,
-            'valid_to' => $validTo,
-            'config' => $config,
-        ]);
-
-        return compact('day', 'time');
-    }
-
-    public function recalculateForBusiness(Business $business): void
-    {
-        $config = json_decode($business->config_json, true) ?? [];
-
-        AvailabilitySchedule::where('business_id', $business->id)
-            ->where('status', 'available')
-            ->delete();
-
-        $this->generateSlotsFromConfig($business->id, $config);
-
-        $this->applyManualBlocks($business->id);
-
-        $this->syncWithExistingReservations($business->id);
-    }
-
-    private function generateSlotsFromConfig(int $businessId, array $config): void
-    {
-        $days = $config['days'] ?? ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
-        $startTime = $config['valid_from'] ?? '09:00';
-        $endTime = $config['valid_to'] ?? '17:00';
-        $interval = $config['interval'] ?? 30;
+        $days = $config->days ?? [1, 2]; // Padrão ISO (1-7)
+        $startTime = $config->valid_from;
+        $endTime = $config->valid_to;
+        $interval = $this->normalizeInterval($config->interval ?? 30);
 
         $period = CarbonPeriod::create(
             now()->startOfWeek(),
@@ -88,97 +38,195 @@ class ScheduleGenerator
         );
 
         foreach ($period as $date) {
-            if (!in_array(strtolower($date->englishDayOfWeek), $days)) {
+            if (!$this->shouldProcessDay($date, $days)) {
                 continue;
             }
 
-            $current = $date->copy()->setTimeFromTimeString($startTime);
-            $end = $date->copy()->setTimeFromTimeString($endTime);
+            $slots = array_merge($slots, $this->generateDaySlots(
+                $businessId,
+                $scheduleConfigId,
+                $date,
+                $startTime,
+                $endTime,
+                $interval,
+                $config
+            ));
+        }
 
-            while ($current <= $end) {
-                AvailabilitySchedule::updateOrCreate([
-                    'business_id' => $businessId,
-                    'valid_from' => $current,
-                    'valid_to' => $current->copy()->addMinutes($interval),
-                ], [
-                    'status' => 'available',
-                    'resource_type' => $config['resource_type'] ?? null,
-                    'resource_id' => $config['resource_id'] ?? null,
-                    'config' => $config,
-                ]);
+        return $slots;
+    }
 
-                $current->addMinutes($interval);
-            }
+    public function recalculateForBusiness(Business $business): void
+    {
+        try {
+            DB::transaction(function () use ($business) {
+                AvailabilitySchedule::where('business_id', $business->id)
+                    ->where('status', 'available')
+                    ->delete();
+
+                foreach ($business->scheduleConfigs as $config) {
+                    $this->generate($business->id, $config->id);
+                }
+
+                $this->applyManualBlocks($business->id);
+                $this->syncWithExistingReservations($business->id);
+            });
+        } catch (QueryException $e) {
+            report($e);
+            throw new \RuntimeException('Falha ao recalcular agenda. Tente novamente.');
         }
     }
+
     public function getAvailability(int $businessId, string $startDate, string $endDate): array
     {
         $start = Carbon::parse($startDate);
         $end = Carbon::parse($endDate);
 
-        if ($start->diffInDays($end) > 30) {
-            throw new \InvalidArgumentException('Período máximo de consulta é 30 dias');
+        if ($start->diffInDays($end) > self::MAX_QUERY_DAYS) {
+            throw new \InvalidArgumentException(
+                "Período máximo de consulta é " . self::MAX_QUERY_DAYS . " dias"
+            );
         }
 
-        $query = AvailabilitySchedule::where('business_id', $businessId)
-            ->where('valid_from', '>=', $start)
-            ->where('valid_to', '<=', $end)
-            ->whereNotIn('id', function ($subquery) {
-                $subquery->select('availability_schedule_id')
-                    ->from('reservations')
-                    ->where('status', '!=', 'cancelled');
-            });
+        $business = Business::findOrFail($businessId);
 
-        $cacheKey = "business:{$businessId}:availability:{$start->toDateString()}:{$end->toDateString()}";
+        $slots = $this->fetchAvailableSlots($businessId, $start, $end);
 
-        $slots = Cache::remember($cacheKey, now()->addHour(), function () use ($query) {
-            return $query->get()->map(function ($slot) {
-                return [
-                    'id' => $slot->id,
-                    'start' => optional($slot->valid_from)->toIso8601String(),
-                    'end' => optional($slot->valid_to)->toIso8601String(),
-                    'resource' => $slot->resource_id ? [
-                        'type' => $slot->resource_type,
-                        'id' => $slot->resource_id
-                    ] : null
-                ];
-            });
-        });
-
-
-        $business = Business::find($businessId);
-        return $this->adjustForTimezone(collect($slots), $business->timezone);
+        return $this->formatSlotsForResponse($slots, $business->timezone);
     }
 
-    private function adjustForTimezone(Collection $slots, string $timezone): array
+    private function generateDaySlots(
+        int $businessId,
+        int $scheduleConfigId,
+        Carbon $date,
+        string $startTime,
+        string $endTime,
+        int $interval,
+        ScheduleConfig $config
+    ): array {
+        $slots = [];
+        $current = $date->copy()->setTimeFromTimeString($startTime);
+        $end = $date->copy()->setTimeFromTimeString($endTime);
+
+        while ($current <= $end) {
+            $slots[] = $this->createSlotRecord(
+                $businessId,
+                $scheduleConfigId,
+                $current,
+                $interval,
+                $config
+            );
+
+            $current->addMinutes($interval);
+        }
+
+        return $slots;
+    }
+
+    private function createSlotRecord(
+        int $businessId,
+        int $scheduleConfigId,
+        Carbon $start,
+        int $interval,
+        ScheduleConfig $config
+    ): AvailabilitySchedule {
+        return AvailabilitySchedule::create([
+            'business_id' => $businessId,
+            'schedule_config_id' => $scheduleConfigId,
+            'valid_from' => $start->copy(),
+            'valid_to' => $start->copy()->addMinutes($interval),
+            'day' => strtolower($start->englishDayOfWeek),
+            'time' => $start->format('H:i'),
+            'status' => 'available',
+            'config' => $config->toArray(),
+            'resource_type' => $config->resource_type ?? null,
+            'resource_id' => $config->resource_id ?? null,
+        ]);
+    }
+
+    private function shouldProcessDay(Carbon $date, array $days): bool
+    {
+        return in_array($date->dayOfWeekIso, $days);
+    }
+
+    private function validateConfig(ScheduleConfig $config): void
+    {
+        if (Carbon::parse($config->valid_from) >= Carbon::parse($config->valid_to)) {
+            throw new \InvalidArgumentException(
+                'O horário final deve ser após o horário inicial'
+            );
+        }
+    }
+
+    private function normalizeInterval(int $interval): int
+    {
+        return max(self::MIN_INTERVAL, min(self::MAX_INTERVAL, $interval));
+    }
+
+    private function fetchAvailableSlots(int $businessId, Carbon $start, Carbon $end): Collection
+    {
+        $cacheKey = $this->buildCacheKey($businessId, $start, $end);
+
+        return Cache::remember($cacheKey, now()->addHour(), function () use ($businessId, $start, $end) {
+            return AvailabilitySchedule::query()
+                ->where('business_id', $businessId)
+                ->whereBetween('valid_from', [$start, $end])
+                ->where('status', 'available')
+                ->whereNotIn('id', function ($query) {
+                    $query->select('availability_schedule_id')
+                        ->from('reservations')
+                        ->where('status', '!=', 'cancelled');
+                })
+                ->get();
+        });
+    }
+
+    private function buildCacheKey(int $businessId, Carbon $start, Carbon $end): string
+    {
+        return sprintf(
+            'business:%d:availability:%s:%s',
+            $businessId,
+            $start->toDateString(),
+            $end->toDateString()
+        );
+    }
+
+    private function formatSlotsForResponse(Collection $slots, string $timezone): array
     {
         return $slots->map(function ($slot) use ($timezone) {
             return [
-                ...$slot,
-                'start_local' => Carbon::parse($slot['start'])->setTimezone($timezone)->format('Y-m-d H:i:s'),
-                'end_local' => Carbon::parse($slot['end'])->setTimezone($timezone)->format('Y-m-d H:i:s')
+                'id' => $slot->id,
+                'start' => $slot->valid_from->toIso8601String(),
+                'end' => $slot->valid_to->toIso8601String(),
+                'start_local' => $slot->valid_from->copy()->setTimezone($timezone)->toDateTimeString(),
+                'end_local' => $slot->valid_to->copy()->setTimezone($timezone)->toDateTimeString(),
+                'resource' => $slot->resource_id ? [
+                    'type' => $slot->resource_type,
+                    'id' => $slot->resource_id
+                ] : null
             ];
         })->toArray();
     }
 
     private function applyManualBlocks(int $businessId): void
     {
-        $blocks = BlockedSlot::where('business_id', $businessId)->get();
-
-        foreach ($blocks as $block) {
-            AvailabilitySchedule::where('business_id', $businessId)
-                ->where('valid_from', '>=', $block->start_time)
-                ->where('valid_to', '<=', $block->end_time)
-                ->update(['status' => 'blocked']);
-        }
+        BlockedSlot::where('business_id', $businessId)
+            ->each(function ($block) use ($businessId) {
+                AvailabilitySchedule::where('business_id', $businessId)
+                    ->whereBetween('valid_from', [$block->start_time, $block->end_time])
+                    ->update(['status' => 'blocked']);
+            });
     }
+
     private function syncWithExistingReservations(int $businessId): void
     {
         $reservedSlotIds = Reservation::where('business_id', $businessId)
             ->where('status', '!=', 'cancelled')
             ->pluck('availability_schedule_id');
 
-        AvailabilitySchedule::whereIn('id', $reservedSlotIds)
-            ->update(['status' => 'reserved']);
+        if ($reservedSlotIds->isNotEmpty()) {
+            AvailabilitySchedule::whereIn('id', $reservedSlotIds)
+                ->update(['status' => 'reserved']);
+        }
     }
 }

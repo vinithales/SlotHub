@@ -11,10 +11,14 @@ class AvailabilitySchedule extends Model
 
     protected $fillable = [
         'business_id',
-        'config',
+        'schedule_config_id',
         'valid_from',
         'valid_to',
-        'is_active',
+        'status',
+        'day',
+        'time',
+        'config',
+        'is_active'
     ];
 
     protected $casts = [
@@ -32,5 +36,9 @@ class AvailabilitySchedule extends Model
     public function reservations()
     {
         return $this->hasMany(Reservation::class);
+    }
+    public function scheduleConfig()
+    {
+        return $this->belongsTo(ScheduleConfig::class);
     }
 }
