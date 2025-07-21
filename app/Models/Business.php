@@ -12,13 +12,10 @@ class Business extends Model
     protected $fillable = [
         'name',
         'timezone',
-        'config',
+        'shedule',
         'slug',
     ];
 
-    protected $casts = [
-        'config' => 'array',  
-    ];
 
     public function schedules()
     {
@@ -33,5 +30,10 @@ class Business extends Model
     public function blockedSlots()
     {
         return $this->hasMany(BlockedSlot::class);
+    }
+
+    public function scheduleConfigs()
+    {
+        return $this->hasMany(ScheduleConfig::class);
     }
 }

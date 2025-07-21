@@ -21,13 +21,13 @@ class ScheduleController extends Controller
 
     public function generateSchedule(GenerateScheduleRequest $request): JsonResponse
     {
-        $validated = $request->validated();
+        $data = $request->validated();
 
-        AvailabilitySchedule::where('business_id', $validated['business_id'])->delete();
+        AvailabilitySchedule::where('business_id', $data['business_id'])->delete();
 
         $schedule = $this->scheduleGenerator->generate(
-            $validated['business_id'],
-            $validated['config']
+            $data['business_id'],
+            $data['config']
         );
 
         return response()->json([
@@ -39,11 +39,11 @@ class ScheduleController extends Controller
 
     public function updateConfig(UpdateConfigRequest $request): JsonResponse
     {
-        $validated = $request->validated();
+        $data = $request->validated();
 
-        $business = Business::findOrFail($validated['business_id']);
+        $business = Business::findOrFail($data['business_id']);
         $business->update([
-            'config' => $validated['config']
+            'config' => $data['config']
         ]);
 
 
@@ -57,12 +57,12 @@ class ScheduleController extends Controller
 
     public function listAvailability(ListAvailabilityRequest $request): JsonResponse
     {
-        $validated = $request->validated();
+        $data = $request->validated();
 
         $slots = $this->scheduleGenerator->getAvailability(
-            $validated['business_id'],
-            $validated['valid_from'],
-            $validated['valid_to']
+            $data['business_id'],
+            $data['valid_from'],
+            $data['valid_to']
         );
 
         return response()->json([

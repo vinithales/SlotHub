@@ -11,11 +11,13 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('businesses', function (Blueprint $table) {
+        Schema::create('schedule_configs', function (Blueprint $table) {
             $table->id();
-            $table->string('name');
-            $table->string('timezone')->default('UTC');
-            $table->string('slug')->unique();
+            $table->foreignId('business_id')->constrained()->onDelete('cascade');
+            $table->unsignedTinyInteger('day_of_week');
+            $table->time('valid_from');
+            $table->time('valid_to');
+            $table->unsignedInteger('interval');
             $table->timestamps();
         });
     }
@@ -25,6 +27,6 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('businesses');
+        Schema::dropIfExists('schedule_configs');
     }
 };
